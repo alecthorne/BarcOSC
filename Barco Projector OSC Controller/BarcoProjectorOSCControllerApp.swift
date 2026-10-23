@@ -7,7 +7,7 @@ struct BarcoProjectorOSCControllerApp: App {
     @StateObject private var model = AppModel.shared
 
     var body: some Scene {
-        Window("Barco Projector OSC Controller", id: "main") {
+        Window("BarcOSC", id: "main") {
             ContentView()
                 .environmentObject(model)
         }

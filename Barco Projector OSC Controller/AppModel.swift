@@ -244,7 +244,7 @@ final class AppModel: ObservableObject {
         panel.title = "Save Settings"
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "Barco Projector Settings.json"
+        panel.nameFieldStringValue = "BarcOSC Settings.json"
         panel.begin { [weak self] response in
             MainActor.assumeIsolated {
                 guard let self, response == .OK, let url = panel.url else { return }
