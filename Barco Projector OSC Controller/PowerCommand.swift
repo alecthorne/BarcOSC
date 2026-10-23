@@ -26,7 +26,7 @@ enum PowerCommandParser {
     ///   /projector/3/power on
     ///   /projector/{1,2}/power off
     ///   /projector/3/power status
-    static func parse(_ message: OSCMessage) -> PowerCommandParseResult {
+    static func parse(_ message: OSCMessage, knownIndexes: [UInt]) -> PowerCommandParseResult {
         // "/projector/{1,2}/power" → ["", "projector", "{1,2}", "power"]
         let parts = message.address.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 4,
@@ -37,9 +37,9 @@ enum PowerCommandParser {
         }
 
         let indexes: [UInt]
-        switch FadeCommandParser.parseProjectorIndexes(parts[2]) {
+        switch FadeCommandParser.parseProjectorIndexes(parts[2], knownIndexes: knownIndexes) {
         case .success(let parsed): indexes = parsed
-        case .failure(let bad): return .invalid("projector OSC target \"\(bad.text)\" isn't a whole number.")
+        case .failure(let bad): return .invalid(bad.reason)
         }
 
         let tokens = FadeCommandParser.tokens(from: message.arguments)

@@ -7,18 +7,31 @@ import Foundation
 ///       "formatVersion" : 1,
 ///       "logProjectorCommands" : false,
 ///       "logReceivedOSC" : false,
+///       "oscAllowedSenders" : [ "10.10.3.20", "10.10.3.21" ],
+///       "oscInterface" : "en0",
+///       "oscOnlyFromAllowedSenders" : true,
+///       "oscPort" : 9090,
+///       "oscTCPOnly" : true,
 ///       "projectors" : [
 ///         { "index" : 1, "ipAddress" : "10.10.3.5", "name" : "FOH SL - BARCO-1" }
 ///       ]
 ///     }
+///
+/// `oscInterface` is "all", "lo0" (this Mac only), or an interface's BSD name such as "en0".
 struct SettingsFile: Encodable {
     static let currentFormatVersion = 1
 
     var formatVersion: Int
     var defaultFadeTime: Float
-    /// Optional when reading, so hand-written files can leave them out (the current setting is kept).
+    /// Optional when reading, so hand-written files and files from earlier versions can leave
+    /// them out (the current setting is kept).
     var logReceivedOSC: Bool?
     var logProjectorCommands: Bool?
+    var oscInterface: String?
+    var oscPort: UInt16?
+    var oscOnlyFromAllowedSenders: Bool?
+    var oscAllowedSenders: [String]?
+    var oscTCPOnly: Bool?
     var projectors: [Projector]
 
     struct InvalidFile: Error {
@@ -37,6 +50,12 @@ struct SettingsFile: Encodable {
         let defaultFadeTime: Float
         let logReceivedOSC: Bool?
         let logProjectorCommands: Bool?
+        let oscInterface: String?
+        /// Read as any number so a bad port gets a clear message.
+        let oscPort: Double?
+        let oscOnlyFromAllowedSenders: Bool?
+        let oscAllowedSenders: [String]?
+        let oscTCPOnly: Bool?
         let projectors: [RawProjector]
     }
 
@@ -68,8 +87,37 @@ struct SettingsFile: Encodable {
         }
 
         var messages: [String] = []
-        if !file.defaultFadeTime.isFinite || file.defaultFadeTime < 0 {
-            messages.append("\"defaultFadeTime\" is \(file.defaultFadeTime). It must be a number of seconds that is 0 or greater.")
+        if !FadeCommandParser.isValidFadeTime(file.defaultFadeTime) {
+            messages.append("\"defaultFadeTime\" is \(file.defaultFadeTime). It must be a number of seconds from 0 to \(FadeCommandParser.maximumFadeTimeText).")
+        }
+
+        var oscInterface: String?
+        if let raw = file.oscInterface {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.contains(where: \.isWhitespace) {
+                messages.append("\"oscInterface\" is \"\(raw)\". It must be \"\(OSCInputSettings.allInterfaces)\", \"\(OSCInputSettings.loopbackInterface)\", or an interface name such as \"en0\".")
+            } else {
+                oscInterface = trimmed
+            }
+        }
+
+        var oscPort: UInt16?
+        if let raw = file.oscPort {
+            if raw >= 1 && raw <= Double(UInt16.max) && raw == raw.rounded() {
+                oscPort = UInt16(raw)
+            } else {
+                messages.append("\"oscPort\" is \(raw). It must be a whole number from 1 to 65535.")
+            }
+        }
+
+        var oscAllowedSenders: [String]?
+        if let raw = file.oscAllowedSenders {
+            let parsed = OSCInputSettings.parseAllowedSenders(raw.joined(separator: ","))
+            if parsed.invalid.isEmpty {
+                oscAllowedSenders = parsed.addresses
+            } else {
+                messages.append("\"oscAllowedSenders\": " + OSCInputSettings.invalidSendersMessage(parsed.invalid))
+            }
         }
 
         // Run every projector through the same checks as Add Projector, including duplicates.
@@ -95,6 +143,11 @@ struct SettingsFile: Encodable {
                                      defaultFadeTime: file.defaultFadeTime,
                                      logReceivedOSC: file.logReceivedOSC,
                                      logProjectorCommands: file.logProjectorCommands,
+                                     oscInterface: oscInterface,
+                                     oscPort: oscPort,
+                                     oscOnlyFromAllowedSenders: file.oscOnlyFromAllowedSenders,
+                                     oscAllowedSenders: oscAllowedSenders,
+                                     oscTCPOnly: file.oscTCPOnly,
                                      projectors: accepted.sorted { $0.index < $1.index }))
     }
 

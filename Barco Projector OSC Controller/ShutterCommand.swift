@@ -27,7 +27,7 @@ enum ShutterCommandParser {
     ///   /projector/{1,2}/shutter close
     ///   /projector/3/shutter status
     /// The action may be sent as an OSC string argument (QLab sends what you type after the address).
-    static func parse(_ message: OSCMessage) -> ShutterCommandParseResult {
+    static func parse(_ message: OSCMessage, knownIndexes: [UInt]) -> ShutterCommandParseResult {
         // "/projector/{1,2}/shutter" → ["", "projector", "{1,2}", "shutter"]
         let parts = message.address.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 4,
@@ -38,9 +38,9 @@ enum ShutterCommandParser {
         }
 
         let indexes: [UInt]
-        switch FadeCommandParser.parseProjectorIndexes(parts[2]) {
+        switch FadeCommandParser.parseProjectorIndexes(parts[2], knownIndexes: knownIndexes) {
         case .success(let parsed): indexes = parsed
-        case .failure(let bad): return .invalid("projector OSC target \"\(bad.text)\" isn't a whole number.")
+        case .failure(let bad): return .invalid(bad.reason)
         }
 
         let tokens = FadeCommandParser.tokens(from: message.arguments)

@@ -118,6 +118,91 @@ enum OSCParser {
     }
 }
 
+// MARK: - Address pattern matching (OSC 1.0)
+
+/// Matches one part of an OSC address pattern (the text between two slashes) against a name:
+///   `?` any one character, `*` any run of characters, `[1-3]` / `[135]` one listed character,
+///   `[!4]` one character not listed, `{1,12}` any of the comma-separated strings.
+enum OSCAddressPattern {
+    /// True if `part` uses any pattern syntax other than a plain `{a,b}` list.
+    static func hasWildcards(_ part: some StringProtocol) -> Bool {
+        part.contains { "*?[]".contains($0) }
+    }
+
+    /// Returns a reason (a sentence fragment) if the pattern's brackets or braces don't pair up.
+    static func problem(in pattern: String) -> String? {
+        var open: Character?
+        for character in pattern {
+            switch character {
+            case "[", "{":
+                if let open { return "it has \"\(character)\" inside \"\(open)…\"" }
+                open = character
+            case "]", "}":
+                let expected: Character = character == "]" ? "[" : "{"
+                guard open == expected else { return "it has \"\(character)\" without a matching \"\(expected)\"" }
+                open = nil
+            default:
+                break
+            }
+        }
+        if let open { return "it has \"\(open)\" without a closing \"\(open == "[" ? "]" : "}")\"" }
+        return nil
+    }
+
+    /// Call `problem(in:)` first; a malformed pattern matches nothing.
+    static func matches(_ pattern: String, _ name: String) -> Bool {
+        matches(Array(pattern)[...], Array(name)[...])
+    }
+
+    private static func matches(_ pattern: ArraySlice<Character>, _ name: ArraySlice<Character>) -> Bool {
+        guard let first = pattern.first else { return name.isEmpty }
+        let rest = pattern.dropFirst()
+        switch first {
+        case "*":
+            var tail = name
+            while true {
+                if matches(rest, tail) { return true }
+                guard !tail.isEmpty else { return false }
+                tail = tail.dropFirst()
+            }
+        case "?":
+            return !name.isEmpty && matches(rest, name.dropFirst())
+        case "[":
+            guard let close = rest.firstIndex(of: "]"), let character = name.first else { return false }
+            var set = rest[rest.startIndex..<close]
+            let negated = set.first == "!"
+            if negated { set = set.dropFirst() }
+            return contains(set, character) != negated && matches(pattern[(close + 1)...], name.dropFirst())
+        case "{":
+            guard let close = rest.firstIndex(of: "}") else { return false }
+            let after = pattern[(close + 1)...]
+            return rest[rest.startIndex..<close]
+                .split(separator: ",", omittingEmptySubsequences: false)
+                .contains { matches($0 + after, name) }
+        default:
+            return name.first == first && matches(rest, name.dropFirst())
+        }
+    }
+
+    /// Whether a bracket set such as `1-35` (the text between `[` and `]`) contains `character`.
+    /// A `-` at the start or end is literal.
+    private static func contains(_ set: ArraySlice<Character>, _ character: Character) -> Bool {
+        let items = Array(set)
+        var i = 0
+        while i < items.count {
+            if i + 2 < items.count, items[i + 1] == "-" {
+                // A backwards range such as 3-1 matches nothing (and would trap as a ClosedRange).
+                if items[i] <= items[i + 2], (items[i]...items[i + 2]).contains(character) { return true }
+                i += 3
+            } else {
+                if items[i] == character { return true }
+                i += 1
+            }
+        }
+        return false
+    }
+}
+
 // MARK: - Encoder (OSC 1.1)
 
 enum OSCEncoder {
@@ -211,7 +296,7 @@ private struct ByteReader {
     }
 }
 
-// MARK: - SLIP framing (OSC 1.1 over TCP, which QLab uses)
+// MARK: - SLIP framing (OSC 1.1 over TCP, which QLab uses; see OSCStreamDecoder)
 
 struct SLIPDecoder {
     // fileprivate so SLIPEncoder can share them.
@@ -223,8 +308,9 @@ struct SLIPDecoder {
     private var frame: [UInt8] = []
     private var escaping = false
 
-    /// Feeds received bytes and returns every frame they complete.
-    mutating func feed(_ data: Data) -> [Data] {
+    /// Feeds received bytes and returns every frame they complete. Throws if a frame grows past
+    /// `OSCStreamDecoder.maximumPacketSize` without ending, so a sender can't grow memory forever.
+    mutating func feed(_ data: Data) throws -> [Data] {
         var frames: [Data] = []
         for byte in data {
             if escaping {
@@ -247,6 +333,9 @@ struct SLIPDecoder {
             default:
                 frame.append(byte)
             }
+            if frame.count > OSCStreamDecoder.maximumPacketSize {
+                throw OSCParseError.malformed("a SLIP-framed TCP packet grew past \(OSCStreamDecoder.maximumPacketSize) bytes without ending")
+            }
         }
         return frames
     }
@@ -265,5 +354,63 @@ enum SLIPEncoder {
         }
         frame.append(SLIPDecoder.end)
         return Data(frame)
+    }
+}
+
+// MARK: - OSC over TCP (either framing)
+
+/// OSC over TCP is framed one of two ways: SLIP (OSC 1.1, which QLab uses), or a big-endian
+/// int32 size before each packet (OSC 1.0). The framing is detected from the first byte received.
+struct OSCStreamDecoder {
+    enum Framing: String {
+        case slip = "SLIP"
+        case lengthPrefixed = "size-prefixed"
+    }
+
+    /// Larger sizes are treated as a framing error rather than buffered.
+    static let maximumPacketSize = 1 << 20
+
+    /// nil until the first byte arrives.
+    private(set) var framing: Framing?
+    private var slip = SLIPDecoder()
+    private var buffer: [UInt8] = []
+
+    /// Feeds received bytes and returns every packet they complete.
+    /// Throws if a size prefix is too large to be real, after which the stream can't be trusted.
+    mutating func feed(_ data: Data) throws -> [Data] {
+        if framing == nil, let first = data.first {
+            // A size prefix starts with 0x00 for any packet under 16 MB. A SLIP stream starts with
+            // END (0xC0), or with the packet's '/' or '#' when the sender only sends a trailing END.
+            framing = first == 0 ? .lengthPrefixed : .slip
+        }
+        switch framing {
+        case .slip:
+            return try slip.feed(data)
+        case .lengthPrefixed:
+            buffer += data
+            var packets: [Data] = []
+            while buffer.count >= 4 {
+                let size = buffer[0..<4].reduce(0) { ($0 << 8) | Int($1) }
+                guard size <= Self.maximumPacketSize else {
+                    throw OSCParseError.malformed("a size-prefixed TCP packet claims to be \(size) bytes, which is too large")
+                }
+                guard buffer.count >= 4 + size else { break }   // wait for the rest of the packet
+                if size > 0 { packets.append(Data(buffer[4..<(4 + size)])) }
+                buffer.removeFirst(4 + size)
+            }
+            return packets
+        case nil:
+            return []
+        }
+    }
+
+    /// Frames a reply the same way the sender frames its packets.
+    func encode(_ packet: Data) -> Data {
+        switch framing {
+        case .lengthPrefixed:
+            return Data(withUnsafeBytes(of: UInt32(packet.count).bigEndian, Array.init)) + packet
+        case .slip, nil:
+            return SLIPEncoder.encode(packet)
+        }
     }
 }
