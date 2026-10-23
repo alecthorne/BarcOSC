@@ -69,7 +69,7 @@ def stacked(c_main, c_osc, c_eye, c_wave):
     tx=512-s*(46.5+block_w/2); ty=512-s*(44.7+block_h/2)
     return f'<g transform="translate({tx:.1f} {ty:.1f}) scale({s:.4f})">{l1}{l2}</g>'
 
-def lens_variant(osc='#fff', word_on=True, s=3.6, cy=430):
+def lens_variant(osc='#fff', word_on=True, s=3.6, cy=430, o_grad=False):
     # big Barco eye as a projector lens, OSC ripples arriving from the left, wordmark below
     tx=512-s*CX; ty=cy-s*CY
     eye=f'<g transform="translate({tx:.1f} {ty:.1f}) scale({s})" fill="#fff"><path d="{EYE}"/><path d="{PUPIL}"/></g>'
@@ -78,13 +78,14 @@ def lens_variant(osc='#fff', word_on=True, s=3.6, cy=430):
     # wordmark BARC + ring O + S + C
     o0=362.7+16; ocx=o0+42.45; s0=o0+84.9+16; c0=s0+68+16
     word=(f'<g fill="#fff" color="#fff">{BARC()}'
-          f'</g><g fill="{osc}" color="{osc}"><circle cx="{ocx}" cy="{MID}" r="{42.45-SW/2}" fill="none" stroke="{osc}" stroke-width="{SW}"/>'
+          + (f'</g><linearGradient id="og" gradientUnits="userSpaceOnUse" x1="{ocx-42.45}" y1="0" x2="{ocx+42.45}" y2="0"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="{osc}"/></linearGradient><g fill="{osc}" color="{osc}">' if o_grad else f'</g><g fill="{osc}" color="{osc}">')
+          + f'<circle cx="{ocx}" cy="{MID}" r="{42.45-SW/2}" fill="none" stroke="{"url(#og)" if o_grad else osc}" stroke-width="{SW}"/>'
           f'{S_path(s0)}{C_at(c0)}</g>')
-    ww=c0+67.9-46.5; ws=560/ww
+    ww=c0+67.9-46.5; ws=640/ww
     word=f'<g transform="translate({512-ws*(46.5+ww/2):.1f} {760-ws*MID:.1f}) scale({ws:.4f})">{word}</g>'
     return rip+beam+eye+(word if word_on else '')
 
 
-open('barcosc-icon-lens.svg','w').write(shell(RED, lens_variant(osc='#B0B0B0')))
+open('barcosc-icon-lens.svg','w').write(shell(RED, lens_variant(osc='#B0B0B0', o_grad=True)))
 open('barcosc-icon-lens-dark-osc.svg','w').write(shell(RED, lens_variant(osc='#3A0000')))
 open('barcosc-icon-lens-small.svg','w').write(shell(RED, lens_variant(word_on=False, s=4.4, cy=512)))
