@@ -1,4 +1,4 @@
-# Barco Projector OSC Controller
+# BarcOSC: Barco Projector OSC Controller
 
 A macOS app that receives OSC messages (for example from QLab or an ETC Eos console) and controls Barco projectors through the Barco Pulse JSON-RPC API. You can fade laser power, set intensity, open and close shutters, power projectors on and off, and query their status.
 
@@ -276,4 +276,4 @@ Send to the address and port shown on the app's *Send OSC to…* line. Over TCP,
 ## Requirements
 
 - macOS 13 or later
-- Barco projectors that support the Pulse JSON-RPC API on TCP port 9090, reachable from this Mac
+- Barco projectors that support the Pulse JSON-RPC API on TCP port 9090, reachable from this Mac. Tested with Barco F90-4K13 projectors; may be compatible with others that share the same Pulse Projector command schema.
