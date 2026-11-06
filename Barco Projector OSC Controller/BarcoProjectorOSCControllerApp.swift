@@ -29,6 +29,12 @@ struct BarcoProjectorOSCControllerApp: App {
                 .environmentObject(model)
         }
         .defaultSize(width: 760, height: 420)
+
+        Window("Projector Notifications", id: "notifications") {
+            NotificationsView()
+                .environmentObject(model)
+        }
+        .defaultSize(width: 680, height: 440)
     }
 }
 

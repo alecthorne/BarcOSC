@@ -5,12 +5,14 @@ import SwiftUI
 struct ProjectorListView: View {
     let projectors: [Projector]
     let connections: [UInt: ProjectorConnection]
-    /// Shows the Shutter and Laser columns. True while connections are open.
+    /// Shows the State, Alarm, Shutter and Laser columns. True while connections are open.
     var showsStatus: Bool = false
     @Binding var selection: UInt?
 
     static let rowHeight: CGFloat = 22
     static let maxVisibleRows = 10
+    static let stateColumnWidth: CGFloat = 105
+    static let alarmColumnWidth: CGFloat = 80
     static let shutterColumnWidth: CGFloat = 70
     static let laserColumnWidth: CGFloat = 50
 
@@ -63,6 +65,8 @@ struct ProjectorListView: View {
             Text("IP Address").frame(width: 120, alignment: .leading)
             Text("Connection").frame(width: 120, alignment: .leading)
             if showsStatus {
+                Text("State").frame(width: Self.stateColumnWidth, alignment: .leading)
+                Text("Alarm").frame(width: Self.alarmColumnWidth, alignment: .leading)
                 Text("Shutter").frame(width: Self.shutterColumnWidth, alignment: .leading)
                 Text("Laser").frame(width: Self.laserColumnWidth, alignment: .trailing)
             }
@@ -157,7 +161,7 @@ private struct ConnectionStatusLabel: View {
     }
 }
 
-/// The live Shutter and Laser cells for one row.
+/// The live State, Alarm, Shutter and Laser cells for one row.
 private struct ProjectorStatusColumns: View {
     let connection: ProjectorConnection?
 
@@ -166,7 +170,8 @@ private struct ProjectorStatusColumns: View {
         if let connection {
             ObservedProjectorStatusColumns(connection: connection)
         } else {
-            ProjectorStatusCells(shutter: nil, laserPower: nil)
+            ProjectorStatusCells(systemState: nil, alarmState: nil, notificationCount: nil,
+                                 shutter: nil, laserPower: nil)
         }
     }
 }
@@ -175,15 +180,45 @@ private struct ObservedProjectorStatusColumns: View {
     @ObservedObject var connection: ProjectorConnection
 
     var body: some View {
-        ProjectorStatusCells(shutter: connection.shutterPosition, laserPower: connection.laserPower)
+        ProjectorStatusCells(systemState: connection.systemState,
+                             alarmState: connection.alarmState,
+                             notificationCount: connection.notifications?.count,
+                             shutter: connection.shutterPosition,
+                             laserPower: connection.laserPower)
     }
 }
 
 private struct ProjectorStatusCells: View {
+    let systemState: String?
+    let alarmState: String?
+    let notificationCount: Int?
     let shutter: String?
     let laserPower: Double?
 
     var body: some View {
+        Group {
+            if let systemState {
+                Text(SystemStateText.display(systemState))
+                    .lineLimit(1)
+                    .foregroundStyle(systemState.lowercased() == "error" ? Color.red : Color.primary)
+            } else {
+                Text("—").foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: ProjectorListView.stateColumnWidth, alignment: .leading)
+        .help(systemState.map { "Power state: \(SystemStateText.display($0))" } ?? "Power state not known yet")
+
+        HStack(spacing: 5) {
+            if let alarmState {
+                Circle().fill(AlarmStateStyle.color(alarmState)).frame(width: 8, height: 8)
+                Text(alarmState).lineLimit(1)
+            } else {
+                Text("—").foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: ProjectorListView.alarmColumnWidth, alignment: .leading)
+        .help(alarmHelp)
+
         HStack(spacing: 5) {
             if let shutter {
                 Image(systemName: shutter == "Open" ? "circle" : "circle.slash")
@@ -204,9 +239,47 @@ private struct ProjectorStatusCells: View {
             .help(laserPower == nil ? "Laser power not known yet" : "Laser power \(laserText)")
     }
 
+    private var alarmHelp: String {
+        guard let alarmState else { return "Alarm state not known yet" }
+        var text = "Alarm state: \(alarmState)"
+        if let notificationCount {
+            text += notificationCount == 1 ? ". 1 active notification" : ". \(notificationCount) active notifications"
+        }
+        return text + ". Click Notifications... for details."
+    }
+
     private var laserText: String {
         guard let laserPower else { return "—" }
         let rounded = (laserPower * 10).rounded() / 10
         return rounded == rounded.rounded() ? "\(Int(rounded))%" : String(format: "%.1f%%", rounded)
+    }
+}
+
+/// system.state values as words, e.g. "deconditioning" -> "Deconditioning".
+enum SystemStateText {
+    static func display(_ state: String) -> String {
+        state.prefix(1).uppercased() + state.dropFirst()
+    }
+}
+
+/// Colors for environment.alarmstate and notification severities.
+enum AlarmStateStyle {
+    static func color(_ alarmState: String) -> Color {
+        switch alarmState.lowercased() {
+        case "ok": return .green
+        case "warning": return .yellow
+        case "alert": return .orange
+        case "error", "fatal": return .red
+        default: return .gray
+        }
+    }
+
+    static func color(severity: String) -> Color {
+        switch severity.uppercased() {
+        case "CAUTION": return .yellow
+        case "WARNING": return .orange
+        case "ERROR", "CRITICAL": return .red
+        default: return .blue   // INFO
+        }
     }
 }
