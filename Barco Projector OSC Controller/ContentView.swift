@@ -34,6 +34,7 @@ struct ContentView: View {
 
             ProjectorListView(projectors: model.projectors,
                               connections: model.connections,
+                              showsStatus: model.connectionsOpen,
                               selection: $selectedIndex)
 
             HStack {

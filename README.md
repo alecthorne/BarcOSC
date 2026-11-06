@@ -201,6 +201,8 @@ You can only add, edit or delete projectors while connections are closed.
 
 **Open Connections** connects to every projector in the list over TCP port 9090 (the Barco Pulse JSON-RPC API) and starts listening for OSC. It's the window's default button, so pressing Return opens connections (except while you're typing in a text field). If a connection drops, the app keeps trying to reconnect every 3 seconds. **Close Connections** cancels running fades and pending power offs, closes every projector connection and stops listening for OSC.
 
+While connections are open, the projector list also shows a **Shutter** column (Open or Closed) and a **Laser** column (laser power in percent) for each projector. The app subscribes to `optics.shutter.position` and `illumination.sources.laser.power` on each projector, so both update live, whether the change came from an OSC cue, the projector's own controls or another app. A dash means the value isn't known yet, for example while the projector is reconnecting.
+
 While connections are open, the app keeps running reliably in the background:
 
 - It stops macOS from slowing it down when the window is hidden (App Nap) and stops the Mac from idle-sleeping, which would drop every connection. The display can still sleep.

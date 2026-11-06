@@ -39,6 +39,8 @@ final class ProjectorConnection: ObservableObject {
     static let shutterPositionProperty = "optics.shutter.position"
     /// Read-only power state, e.g. "on", "standby", "conditioning", "deconditioning", "ready", "eco".
     static let systemStateProperty = "system.state"
+    /// Properties the connection subscribes to so the projector list can show them live.
+    static let statusProperties = [shutterPositionProperty, laserPowerProperty]
     static let requestTimeout: Duration = .seconds(3)
     /// How long to wait for a property.set confirmation before sending the next queued value anyway.
     static let setConfirmationTimeout: Duration = .seconds(1)
@@ -48,6 +50,10 @@ final class ProjectorConnection: ObservableObject {
 
     let projector: Projector
     @Published private(set) var state: ProjectorConnectionState = .disconnected
+    /// The shutter position the projector last reported ("Open" or "Closed"), or nil if not known yet.
+    @Published private(set) var shutterPosition: String?
+    /// The laser power in percent the projector last reported, or nil if not known yet.
+    @Published private(set) var laserPower: Double?
 
     /// Errors and connection events for the main Log.
     var onLog: ((String) -> Void)?
@@ -127,6 +133,7 @@ final class ProjectorConnection: ObservableObject {
             state = .connected
             onLog?(lastProblem == nil ? "Connected to \(label)." : "Reconnected to \(label).")
             lastProblem = nil
+            startStatusUpdates(key: key)
         case .waiting(let error):
             connectionLost("can't reach the projector (\(error.localizedDescription)).")
         case .failed(let error):
@@ -162,6 +169,8 @@ final class ProjectorConnection: ObservableObject {
         receiveBuffer.removeAll()
         powerSetInFlightID = nil
         queuedPower = nil
+        shutterPosition = nil
+        laserPower = nil
         let waiting = pendingRequests
         pendingRequests.removeAll()
         for continuation in waiting.values {
@@ -274,8 +283,74 @@ final class ProjectorConnection: ObservableObject {
 
         if let id, let continuation = pendingRequests.removeValue(forKey: id) {
             continuation.resume(returning: RequestReply(result: object["result"], text: text))
+            return
         }
-        // Anything else (property.set confirmations, property.changed notifications) needs no action.
+
+        if object["method"] as? String == "property.changed" {
+            handlePropertyChanged(object["params"])
+        }
+        // Anything else (property.set confirmations, signal callbacks) needs no action.
+    }
+
+    // MARK: - Live status
+
+    /// Subscribes to the shutter position and laser power, then reads their current values,
+    /// since a subscription only reports later changes.
+    private func startStatusUpdates(key: ObjectIdentifier) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.request(method: "property.subscribe", params: ["property": Self.statusProperties])
+            } catch {
+                guard self.isCurrentConnection(key) else { return }
+                self.onLog?("ERROR: Couldn't subscribe to shutter and laser power updates from \(self.label): \(error.localizedDescription)")
+            }
+            for property in Self.statusProperties {
+                guard self.isCurrentConnection(key) else { return }
+                do {
+                    let reply = try await self.getProperty(property)
+                    guard self.isCurrentConnection(key) else { return }
+                    self.applyStatus(property: property, value: reply.result)
+                } catch {
+                    guard self.isCurrentConnection(key) else { return }
+                    self.onLog?("ERROR: Couldn't read \(property) from \(self.label): \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func isCurrentConnection(_ key: ObjectIdentifier) -> Bool {
+        guard let connection, state == .connected else { return false }
+        return ObjectIdentifier(connection) == key
+    }
+
+    /// params.property is an array of single-entry {property: value} objects.
+    private func handlePropertyChanged(_ params: Any?) {
+        guard let params = params as? [String: Any] else { return }
+        let entries: [[String: Any]]
+        if let list = params["property"] as? [[String: Any]] {
+            entries = list
+        } else if let single = params["property"] as? [String: Any] {
+            entries = [single]
+        } else {
+            return
+        }
+        for entry in entries {
+            for (property, value) in entry {
+                applyStatus(property: property, value: value)
+            }
+        }
+    }
+
+    private func applyStatus(property: String, value: Any?) {
+        switch property {
+        case Self.shutterPositionProperty:
+            shutterPosition = value as? String
+        case Self.laserPowerProperty:
+            laserPower = (value as? NSNumber)?.doubleValue
+        default:
+            break
+        }
     }
 
     private static func describeRPCError(_ error: Any) -> String {

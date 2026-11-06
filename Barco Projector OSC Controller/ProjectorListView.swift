@@ -5,10 +5,14 @@ import SwiftUI
 struct ProjectorListView: View {
     let projectors: [Projector]
     let connections: [UInt: ProjectorConnection]
+    /// Shows the Shutter and Laser columns. True while connections are open.
+    var showsStatus: Bool = false
     @Binding var selection: UInt?
 
     static let rowHeight: CGFloat = 22
     static let maxVisibleRows = 10
+    static let shutterColumnWidth: CGFloat = 70
+    static let laserColumnWidth: CGFloat = 50
 
     /// Projector rows (or the empty-list message) plus the trailing empty row.
     private var contentRows: Int {
@@ -58,6 +62,10 @@ struct ProjectorListView: View {
             Text("Name").frame(maxWidth: .infinity, alignment: .leading)
             Text("IP Address").frame(width: 120, alignment: .leading)
             Text("Connection").frame(width: 120, alignment: .leading)
+            if showsStatus {
+                Text("Shutter").frame(width: Self.shutterColumnWidth, alignment: .leading)
+                Text("Laser").frame(width: Self.laserColumnWidth, alignment: .trailing)
+            }
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
@@ -80,6 +88,9 @@ struct ProjectorListView: View {
                 .frame(width: 120, alignment: .leading)
             ConnectionStatusView(connection: connections[projector.index])
                 .frame(width: 120, alignment: .leading)
+            if showsStatus {
+                ProjectorStatusColumns(connection: connections[projector.index])
+            }
         }
         .padding(.horizontal, 8)
         .frame(height: Self.rowHeight)
@@ -143,5 +154,59 @@ private struct ConnectionStatusLabel: View {
     private var detail: String {
         if case .retrying(let problem) = state { return "Last problem: \(problem)" }
         return text
+    }
+}
+
+/// The live Shutter and Laser cells for one row.
+private struct ProjectorStatusColumns: View {
+    let connection: ProjectorConnection?
+
+    var body: some View {
+        // @ObservedObject can't be optional, so observe a live connection in its own view.
+        if let connection {
+            ObservedProjectorStatusColumns(connection: connection)
+        } else {
+            ProjectorStatusCells(shutter: nil, laserPower: nil)
+        }
+    }
+}
+
+private struct ObservedProjectorStatusColumns: View {
+    @ObservedObject var connection: ProjectorConnection
+
+    var body: some View {
+        ProjectorStatusCells(shutter: connection.shutterPosition, laserPower: connection.laserPower)
+    }
+}
+
+private struct ProjectorStatusCells: View {
+    let shutter: String?
+    let laserPower: Double?
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if let shutter {
+                Image(systemName: shutter == "Open" ? "circle" : "circle.slash")
+                    .foregroundStyle(shutter == "Open" ? Color.green : Color.secondary)
+                    .imageScale(.small)
+                Text(shutter).lineLimit(1)
+            } else {
+                Text("—").foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: ProjectorListView.shutterColumnWidth, alignment: .leading)
+        .help(shutter.map { "Shutter \($0.lowercased())" } ?? "Shutter position not known yet")
+
+        Text(laserText)
+            .monospacedDigit()
+            .foregroundStyle(laserPower == nil ? .secondary : .primary)
+            .frame(width: ProjectorListView.laserColumnWidth, alignment: .trailing)
+            .help(laserPower == nil ? "Laser power not known yet" : "Laser power \(laserText)")
+    }
+
+    private var laserText: String {
+        guard let laserPower else { return "—" }
+        let rounded = (laserPower * 10).rounded() / 10
+        return rounded == rounded.rounded() ? "\(Int(rounded))%" : String(format: "%.1f%%", rounded)
     }
 }
