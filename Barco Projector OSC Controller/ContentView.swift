@@ -34,6 +34,7 @@ struct ContentView: View {
 
             ProjectorListView(projectors: model.projectors,
                               connections: model.connections,
+                              showsStatus: model.connectionsOpen,
                               selection: $selectedIndex)
 
             HStack {
@@ -44,6 +45,8 @@ struct ContentView: View {
                 Button("Delete Projector") { confirmingDelete = true }
                     .disabled(model.connectionsOpen || selectedProjector == nil)
                 Spacer()
+                Button("Notifications...") { openWindow(id: "notifications") }
+                    .help("Show each projector's power state, alarm state and active notifications")
                 Button("Open Connections") {
                     // Clicking a button doesn't end editing, so apply a port or address still being typed.
                     if commitOSCPortIfChanged() && commitOSCSendersIfChanged() { model.openConnections() }

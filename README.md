@@ -201,6 +201,17 @@ You can only add, edit or delete projectors while connections are closed.
 
 **Open Connections** connects to every projector in the list over TCP port 9090 (the Barco Pulse JSON-RPC API) and starts listening for OSC. It's the window's default button, so pressing Return opens connections (except while you're typing in a text field). If a connection drops, the app keeps trying to reconnect every 3 seconds. **Close Connections** cancels running fades and pending power offs, closes every projector connection and stops listening for OSC.
 
+While connections are open, the projector list also shows four live columns for each projector:
+
+- **State**: the power state from `system.state` (Boot, Eco, Standby, Ready, Conditioning, On, Service, Deconditioning or Error, which shows in red).
+- **Alarm**: the overall health from `environment.alarmstate`, with a colored dot: green for Ok, yellow for Warning, orange for Alert, red for Error or Fatal. Hover over it to see how many notifications are active.
+- **Shutter**: Open or Closed, from `optics.shutter.position`.
+- **Laser**: the laser power in percent, from `illumination.sources.laser.power`.
+
+The app subscribes to these properties on each projector, so they update live, whether the change came from an OSC cue, the projector's own controls or another app. A dash means the value isn't known yet, for example while the projector is reconnecting.
+
+**Notifications...** opens the Projector Notifications window, which lists each projector's active notifications (from `notification.list`) with their severity (Info, Caution, Warning, Error or Critical), message, code and time. The app subscribes to the `notification.emitted` and `notification.dismissed` signals, so the list updates live; **Refresh** reads every list again. Notifications of Warning or above, and any change of alarm state away from Ok, are also written to the main Log.
+
 While connections are open, the app keeps running reliably in the background:
 
 - It stops macOS from slowing it down when the window is hidden (App Nap) and stops the Mac from idle-sleeping, which would drop every connection. The display can still sleep.

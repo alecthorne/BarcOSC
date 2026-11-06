@@ -27,6 +27,38 @@ enum ProjectorRequestError: LocalizedError {
     }
 }
 
+/// One active notification (warning, error and so on) the projector reports through
+/// notification.list and the notification.emitted signal.
+struct ProjectorNotification: Identifiable, Equatable {
+    let id: String
+    /// "INFO", "CAUTION", "WARNING", "ERROR" or "CRITICAL".
+    let severity: String
+    let code: String
+    let message: String
+    let timestamp: String
+
+    init?(_ value: Any?) {
+        guard let dict = value as? [String: Any] else { return nil }
+        func text(_ key: String) -> String {
+            if let string = dict[key] as? String { return string }
+            if let other = dict[key], !(other is NSNull) { return "\(other)" }
+            return ""
+        }
+        let id = text("id")
+        guard !id.isEmpty else { return nil }
+        self.id = id
+        severity = text("severity").uppercased()
+        code = text("code")
+        message = text("message")
+        timestamp = text("timestamp")
+    }
+
+    /// Higher is more severe. Unknown severities rank with INFO.
+    var severityRank: Int {
+        ["INFO": 0, "CAUTION": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4][severity] ?? 0
+    }
+}
+
 /// A kept-alive JSON-RPC (Barco Pulse API) connection to one projector on TCP port 9090.
 /// Reconnects automatically until `close()` is called.
 @MainActor
@@ -39,6 +71,12 @@ final class ProjectorConnection: ObservableObject {
     static let shutterPositionProperty = "optics.shutter.position"
     /// Read-only power state, e.g. "on", "standby", "conditioning", "deconditioning", "ready", "eco".
     static let systemStateProperty = "system.state"
+    /// Read-only overall health: "Ok", "Warning", "Alert", "Error" or "Fatal".
+    static let alarmStateProperty = "environment.alarmstate"
+    /// Properties the connection subscribes to so the projector list can show them live.
+    static let statusProperties = [shutterPositionProperty, laserPowerProperty, systemStateProperty, alarmStateProperty]
+    static let notificationEmittedSignal = "notification.emitted"
+    static let notificationDismissedSignal = "notification.dismissed"
     static let requestTimeout: Duration = .seconds(3)
     /// How long to wait for a property.set confirmation before sending the next queued value anyway.
     static let setConfirmationTimeout: Duration = .seconds(1)
@@ -48,6 +86,17 @@ final class ProjectorConnection: ObservableObject {
 
     let projector: Projector
     @Published private(set) var state: ProjectorConnectionState = .disconnected
+    /// The shutter position the projector last reported ("Open" or "Closed"), or nil if not known yet.
+    @Published private(set) var shutterPosition: String?
+    /// The laser power in percent the projector last reported, or nil if not known yet.
+    @Published private(set) var laserPower: Double?
+    /// The power state the projector last reported, e.g. "on" or "standby", or nil if not known yet.
+    @Published private(set) var systemState: String?
+    /// The alarm state the projector last reported ("Ok", "Warning", "Alert", "Error" or "Fatal"),
+    /// or nil if not known yet.
+    @Published private(set) var alarmState: String?
+    /// The projector's active notifications, most severe first, or nil until they've been read.
+    @Published private(set) var notifications: [ProjectorNotification]?
 
     /// Errors and connection events for the main Log.
     var onLog: ((String) -> Void)?
@@ -127,6 +176,7 @@ final class ProjectorConnection: ObservableObject {
             state = .connected
             onLog?(lastProblem == nil ? "Connected to \(label)." : "Reconnected to \(label).")
             lastProblem = nil
+            startStatusUpdates(key: key)
         case .waiting(let error):
             connectionLost("can't reach the projector (\(error.localizedDescription)).")
         case .failed(let error):
@@ -162,6 +212,11 @@ final class ProjectorConnection: ObservableObject {
         receiveBuffer.removeAll()
         powerSetInFlightID = nil
         queuedPower = nil
+        shutterPosition = nil
+        laserPower = nil
+        systemState = nil
+        alarmState = nil
+        notifications = nil
         let waiting = pendingRequests
         pendingRequests.removeAll()
         for continuation in waiting.values {
@@ -274,8 +329,177 @@ final class ProjectorConnection: ObservableObject {
 
         if let id, let continuation = pendingRequests.removeValue(forKey: id) {
             continuation.resume(returning: RequestReply(result: object["result"], text: text))
+            return
         }
-        // Anything else (property.set confirmations, property.changed notifications) needs no action.
+
+        switch object["method"] as? String {
+        case "property.changed":
+            handlePropertyChanged(object["params"])
+        case "signal.callback":
+            handleSignalCallback(object["params"])
+        default:
+            break   // Anything else (property.set confirmations) needs no action.
+        }
+    }
+
+    // MARK: - Live status
+
+    /// Subscribes to the status properties and notification signals, then reads the current values
+    /// and active notifications, since a subscription only reports later changes.
+    private func startStatusUpdates(key: ObjectIdentifier) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // One at a time, so a property this firmware doesn't have can't stop the others updating.
+            for property in Self.statusProperties {
+                guard self.isCurrentConnection(key) else { return }
+                do {
+                    _ = try await self.request(method: "property.subscribe", params: ["property": property])
+                } catch {
+                    guard self.isCurrentConnection(key) else { return }
+                    self.onLog?("ERROR: Couldn't subscribe to \(property) updates from \(self.label): \(error.localizedDescription)")
+                }
+            }
+            guard self.isCurrentConnection(key) else { return }
+            do {
+                _ = try await self.request(method: "signal.subscribe",
+                                           params: ["signal": [Self.notificationEmittedSignal, Self.notificationDismissedSignal]])
+            } catch {
+                guard self.isCurrentConnection(key) else { return }
+                self.onLog?("ERROR: Couldn't subscribe to notifications from \(self.label): \(error.localizedDescription)")
+            }
+            for property in Self.statusProperties {
+                guard self.isCurrentConnection(key) else { return }
+                do {
+                    let reply = try await self.getProperty(property)
+                    guard self.isCurrentConnection(key) else { return }
+                    self.applyStatus(property: property, value: reply.result)
+                } catch {
+                    guard self.isCurrentConnection(key) else { return }
+                    self.onLog?("ERROR: Couldn't read \(property) from \(self.label): \(error.localizedDescription)")
+                }
+            }
+            guard self.isCurrentConnection(key) else { return }
+            await self.refreshNotifications(logNew: true)
+        }
+    }
+
+    /// Reads the projector's active notifications with notification.list and replaces the stored list.
+    /// With logNew, notifications of WARNING or above that weren't already known go to the main Log.
+    func refreshNotifications(logNew: Bool = false) async {
+        guard state == .connected, let connection else { return }
+        let key = ObjectIdentifier(connection)
+        do {
+            let reply = try await request(method: "notification.list")
+            guard isCurrentConnection(key) else { return }
+            // The result is the array itself; accept {"notifications": [...]} too.
+            guard let items = (reply.result as? [Any])
+                    ?? ((reply.result as? [String: Any])?["notifications"] as? [Any]) else {
+                throw ProjectorRequestError.invalidResponse(reply.text)
+            }
+            let known = Set((notifications ?? []).map(\.id))
+            let list = items.compactMap { ProjectorNotification($0) }
+            if logNew {
+                for notification in list where !known.contains(notification.id) { logNotification(notification) }
+            }
+            notifications = Self.sorted(list)
+        } catch {
+            guard isCurrentConnection(key) else { return }
+            onLog?("ERROR: Couldn't read notifications from \(label): \(error.localizedDescription)")
+        }
+    }
+
+    private static func sorted(_ list: [ProjectorNotification]) -> [ProjectorNotification] {
+        list.sorted {
+            $0.severityRank != $1.severityRank ? $0.severityRank > $1.severityRank : $0.timestamp > $1.timestamp
+        }
+    }
+
+    private func logNotification(_ notification: ProjectorNotification) {
+        guard notification.severityRank >= 2 else { return }   // WARNING and above
+        let code = notification.code.isEmpty ? "" : " (code \(notification.code))"
+        onLog?("\(notification.severity): \(label) reports: \(notification.message)\(code)")
+    }
+
+    /// params.signal is an array of single-entry {signalname: arguments} objects.
+    private func handleSignalCallback(_ params: Any?) {
+        guard let params = params as? [String: Any] else { return }
+        let entries: [[String: Any]]
+        if let list = params["signal"] as? [[String: Any]] {
+            entries = list
+        } else if let single = params["signal"] as? [String: Any] {
+            entries = [single]
+        } else {
+            return
+        }
+        for entry in entries {
+            for (signal, value) in entry {
+                let arguments = value as? [String: Any] ?? [:]
+                switch signal {
+                case Self.notificationEmittedSignal:
+                    // The argument is {"notification": {...}}; accept the bare notification too.
+                    guard let notification = ProjectorNotification(arguments["notification"])
+                            ?? ProjectorNotification(arguments) else { continue }
+                    var list = notifications ?? []
+                    let isNew = !list.contains { $0.id == notification.id }
+                    list.removeAll { $0.id == notification.id }
+                    list.append(notification)
+                    notifications = Self.sorted(list)
+                    if isNew { logNotification(notification) }
+                case Self.notificationDismissedSignal:
+                    guard let id = arguments["id"].map({ $0 as? String ?? "\($0)" }) else { continue }
+                    notifications?.removeAll { $0.id == id }
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    private func isCurrentConnection(_ key: ObjectIdentifier) -> Bool {
+        guard let connection, state == .connected else { return false }
+        return ObjectIdentifier(connection) == key
+    }
+
+    /// params.property is an array of single-entry {property: value} objects.
+    private func handlePropertyChanged(_ params: Any?) {
+        guard let params = params as? [String: Any] else { return }
+        let entries: [[String: Any]]
+        if let list = params["property"] as? [[String: Any]] {
+            entries = list
+        } else if let single = params["property"] as? [String: Any] {
+            entries = [single]
+        } else {
+            return
+        }
+        for entry in entries {
+            for (property, value) in entry {
+                applyStatus(property: property, value: value)
+            }
+        }
+    }
+
+    private func applyStatus(property: String, value: Any?) {
+        switch property {
+        case Self.shutterPositionProperty:
+            shutterPosition = value as? String
+        case Self.laserPowerProperty:
+            laserPower = (value as? NSNumber)?.doubleValue
+        case Self.systemStateProperty:
+            systemState = value as? String
+        case Self.alarmStateProperty:
+            let reported = value as? String
+            let previous = alarmState
+            alarmState = reported
+            guard let newState = reported, newState.caseInsensitiveCompare(previous ?? "") != .orderedSame else { return }
+            if newState.caseInsensitiveCompare("Ok") == .orderedSame {
+                // Only worth a line when it's recovering, not on the first read.
+                if previous != nil { onLog?("\(label) alarm state is back to Ok.") }
+            } else {
+                onLog?("\(newState.uppercased()): \(label) alarm state is \(newState). Click Notifications... for details.")
+            }
+        default:
+            break
+        }
     }
 
     private static func describeRPCError(_ error: Any) -> String {
