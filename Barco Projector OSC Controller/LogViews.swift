@@ -56,26 +56,32 @@ struct LogTextView: NSViewRepresentable {
     }
 }
 
-/// "Log" title, Clear and Save... buttons, the log text, and a grip to resize it.
-struct LogPanel: View {
+/// Collapsible "Log" title, then a row of options with Clear and Save... buttons,
+/// the log text, and a grip to resize it.
+struct LogPanel<Options: View>: View {
     let title: String
     let text: String
+    @Binding var isExpanded: Bool
     @Binding var height: CGFloat
     let onClear: () -> Void
     let onSave: () -> Void
+    @ViewBuilder let options: () -> Options
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title).font(.headline)
-                Spacer()
-                Button("Clear", action: onClear)
-                Button("Save...", action: onSave)
+            CollapsibleSectionHeader(title: title, isExpanded: $isExpanded)
+            if isExpanded {
+                HStack {
+                    options()
+                    Spacer()
+                    Button("Clear", action: onClear)
+                    Button("Save...", action: onSave)
+                }
+                LogTextView(text: text)
+                    .frame(height: height)
+                ResizeGrip(height: $height,
+                           range: LogTextView.height(forLines: 3)...LogTextView.height(forLines: 60))
             }
-            LogTextView(text: text)
-                .frame(height: height)
-            ResizeGrip(height: $height,
-                       range: LogTextView.height(forLines: 3)...LogTextView.height(forLines: 60))
         }
     }
 }
